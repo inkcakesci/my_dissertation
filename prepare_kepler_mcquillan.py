@@ -11,7 +11,7 @@ prepare_kepler_mcquillan.py
 - 将光变保存为 npz：time, flux, flux_err。
 
 依赖：
-    pip install lightkurve astroquery pandas numpy matplotlib
+    pip install lightkurve astroquery pandas numpy matplotlib astropy scipy
 """
 
 import os
@@ -56,8 +56,16 @@ def download_mcquillan_catalog(force: bool = False) -> pd.DataFrame:
 
     print(f"[INFO] Downloading McQuillan+2014 catalog from VizieR ({MCQ_VIZIER_ID})...")
 
-    Vizier.ROW_LIMIT = -1
-    catalogs = Vizier.get_catalogs(MCQ_VIZIER_ID)
+    try:
+        Vizier.ROW_LIMIT = -1
+        catalogs = Vizier.get_catalogs(MCQ_VIZIER_ID)
+    except Exception as e:
+        raise RuntimeError(
+            "[ERROR] Failed to download catalog from VizieR. "
+            "可能是网络或代理配置问题。如果你开启了本地代理但不在 127.0.0.1:7890，"
+            "请自行设置 HTTP(S)_PROXY 环境变量，或者使用 --noproxy 关闭脚本内置代理。\n"
+            f"原始异常：{e}"
+        )
 
     if len(catalogs) == 0:
         raise RuntimeError("No catalog returned from Vizier. Check MCQ_VIZIER_ID.")
@@ -96,7 +104,7 @@ def download_mcquillan_catalog(force: bool = False) -> pd.DataFrame:
 
 def filter_and_sample(
     df: pd.DataFrame,
-    n_sample: int = 200,
+    n_sample: int = 50,
     min_prot: float = 0.5,
     max_prot: float = 40.0,
     seed: int = 42
@@ -147,7 +155,16 @@ def download_kepler_lightcurve_for_kic(kic: int, quarter=None, overwrite: bool =
 
     target = f"KIC {int(kic)}"
     print(f"[INFO] Searching lightcurves for {target} ...")
-    search = lk.search_lightcurve(target, mission="Kepler", cadence="long")
+    try:
+        search = lk.search_lightcurve(target, mission="Kepler", cadence="long")
+    except Exception as e:
+        print(
+            "[ERROR] lightkurve.search_lightcurve 失败，可能是网络或代理错误。\n"
+            "如果你没有在 127.0.0.1:7890 开代理，请使用 --noproxy，"
+            "或自行设置 HTTP(S)_PROXY 环境变量。"
+        )
+        print(f"原始异常: {e}")
+        return None
 
     if quarter is not None:
         # 如果你想指定 quarter，可以根据 search.table 过滤
@@ -162,7 +179,10 @@ def download_kepler_lightcurve_for_kic(kic: int, quarter=None, overwrite: bool =
         lc_collection = search.download_all()
         stitched = lc_collection.stitch().remove_nans()
     except Exception as e:
-        print(f"[ERROR] Failed to download/stitch LC for {target}: {e}")
+        print(
+            f"[ERROR] Failed to download/stitch LC for {target}: {e}\n"
+            "这通常是网络/代理/MAST 连接问题。"
+        )
         return None
 
     # 选择 pdcsap_flux 列（如果存在）
@@ -174,6 +194,7 @@ def download_kepler_lightcurve_for_kic(kic: int, quarter=None, overwrite: bool =
         flux_err = stitched.flux_err
 
     # 保存 npz
+    import numpy as np
     np.savez(
         out_path,
         time=stitched.time.value,   # BTJD (or similar)
@@ -224,7 +245,7 @@ def parse_args():
     parser.add_argument(
         "--n-sample",
         type=int,
-        default=200,
+        default=50,   # 默认 50，方便先跑 benchmark
         help="Number of targets to randomly sample from catalog.",
     )
     parser.add_argument(
@@ -250,7 +271,29 @@ def parse_args():
         action="store_true",
         help="Overwrite existing LC npz files.",
     )
+    parser.add_argument(
+        "--noproxy",
+        action="store_true",
+        help="Do NOT set HTTP(S) proxy to 127.0.0.1:7890 (默认会尝试使用本地代理)。",
+    )
     return parser.parse_args()
+
+
+def configure_proxy(use_proxy: bool = True):
+    """
+    默认：尝试通过 127.0.0.1:7890 走 HTTP(S) 代理。
+    如果用户指定 --noproxy，则不设置。
+    """
+    if not use_proxy:
+        print("[INFO] Not setting HTTP(S) proxy (--noproxy).")
+        return
+
+    proxy = "http://127.0.0.1:7890"
+    # 只在环境变量尚未设置时设定，避免覆盖用户已有配置
+    os.environ.setdefault("HTTP_PROXY", proxy)
+    os.environ.setdefault("HTTPS_PROXY", proxy)
+    os.environ.setdefault("ALL_PROXY", proxy)
+    print(f"[INFO] Using HTTP(S) proxy at {proxy}. 如连接异常可尝试加 --noproxy。")
 
 
 def main():
@@ -259,6 +302,9 @@ def main():
     print(f"[INFO] Data root: {DATA_ROOT}")
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     LC_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 配置代理（默认开 127.0.0.1:7890）
+    configure_proxy(use_proxy=not args.noproxy)
 
     # 1. 下载/加载 catalog
     df_catalog = download_mcquillan_catalog(force=args.force_download_catalog)
