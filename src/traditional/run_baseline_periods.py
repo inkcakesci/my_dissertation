@@ -197,7 +197,12 @@ def main():
                 prot_qpgp = res.period
                 qpgp_logL = res.log_likelihood
                 qpgp_success = res.success
-                print(f"[INFO] QP-GP period = {prot_qpgp:.4f} d (success={res.success})")
+                if res.success and np.isfinite(prot_qpgp):
+                    print(f"[INFO] QP-GP period = {prot_qpgp:.4f} d (success={res.success})")
+                else:
+                    msg = res.message if hasattr(res, "message") else ""
+                    extra = f": {msg}" if msg else ""
+                    print(f"[WARN] QP-GP fit not successful for KIC {kic}{extra}")
             except Exception as e:
                 print(f"[WARN] QP-GP fit failed for KIC {kic}: {e}")
                 prot_qpgp, qpgp_logL, qpgp_success = np.nan, np.nan, False

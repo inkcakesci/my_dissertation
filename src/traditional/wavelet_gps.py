@@ -90,6 +90,36 @@ def _resample_to_uniform(time: np.ndarray, flux: np.ndarray) -> Tuple[np.ndarray
     return t_uniform, y_uniform, dt
 
 
+_HAS_MORLET2 = hasattr(signal, "morlet2")
+_MORLET_FALLBACK_WARNED = False
+
+
+def _morlet_wavelet(length: int, scale: float, w: float = 6.0) -> np.ndarray:
+    """
+    获取 Morlet 小波。
+
+    优先使用 scipy.signal.morlet2（如果当前 SciPy 版本提供），
+    否则用等价公式手动生成，避免旧版 SciPy 缺失 morlet2 时直接报错。
+    """
+    global _MORLET_FALLBACK_WARNED
+
+    if _HAS_MORLET2:
+        return signal.morlet2(length, s=scale, w=w)
+
+    if not _MORLET_FALLBACK_WARNED:
+        print("[WARN] scipy.signal.morlet2 not found; falling back to local implementation.")
+        _MORLET_FALLBACK_WARNED = True
+
+    # 与 SciPy 的定义保持一致：pi^(-1/4) * exp(1j*w*t/scale) * exp(-0.5*(t/scale)^2) / sqrt(scale)
+    # t 在 [-0.5*(M-1), 0.5*(M-1)] 上等间隔取值
+    t = np.linspace(-0.5 * (length - 1), 0.5 * (length - 1), length)
+    ts = t / scale
+    gaussian_envelope = np.exp(-0.5 * ts ** 2)
+    wave = np.exp(1j * w * ts) * gaussian_envelope
+    norm = (np.pi ** -0.25) / np.sqrt(scale)
+    return norm * wave
+
+
 def _cwt_morlet_manual(y: np.ndarray, widths: np.ndarray) -> np.ndarray:
     """
     手写一个非常简单的 CWT：
@@ -107,7 +137,7 @@ def _cwt_morlet_manual(y: np.ndarray, widths: np.ndarray) -> np.ndarray:
         # wavelet 长度：取 max(n, 8*w)，避免太短
         M = max(n, int(8 * w))
         # morlet2(M, s) 里的 s 是类似尺度；这里直接用 width 当尺度
-        psi = signal.morlet2(M, s=w, w=6.0)
+        psi = _morlet_wavelet(M, scale=w, w=6.0)
         # 卷积，mode="same" 保持和 y 同长度
         conv = signal.fftconvolve(y, psi[::-1], mode="same")
         coefs[i, :] = conv

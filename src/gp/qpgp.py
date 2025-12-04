@@ -27,6 +27,7 @@ from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
 from scipy.optimize import minimize
+import inspect
 
 try:
     from celerite2 import GaussianProcess
@@ -85,6 +86,46 @@ def _preprocess(time: np.ndarray,
     return t, y, yerr
 
 
+_ROTATION_HAS_LOG_PARAMS = False
+try:
+    _ROTATION_HAS_LOG_PARAMS = "log_amp" in inspect.signature(terms.RotationTerm).parameters  # type: ignore[arg-type]
+except Exception:
+    _ROTATION_HAS_LOG_PARAMS = False
+
+
+def _build_rotation_term(log_amp: float,
+                         log_period: float,
+                         log_Q0: float,
+                         log_dQ: float,
+                         mix: float):
+    """
+    根据 celerite2 版本构造 RotationTerm：
+    - 旧版使用 log_amp/log_period/log_Q0/log_dQ/mix
+    - 新版使用 sigma/period/Q0/dQ/f
+    """
+    if _ROTATION_HAS_LOG_PARAMS:
+        return terms.RotationTerm(
+            log_amp=log_amp,
+            log_period=log_period,
+            log_Q0=log_Q0,
+            log_dQ=log_dQ,
+            mix=mix,
+        )
+
+    # 新版本接口
+    sigma = np.exp(0.5 * log_amp)
+    period = np.exp(log_period)
+    Q0 = np.exp(log_Q0)
+    dQ = np.exp(log_dQ)
+    return terms.RotationTerm(
+        sigma=sigma,
+        period=period,
+        Q0=Q0,
+        dQ=dQ,
+        f=mix,
+    )
+
+
 def _build_gp(theta: np.ndarray,
               t: np.ndarray,
               yerr: np.ndarray) -> Tuple[GaussianProcess, float]:
@@ -99,7 +140,7 @@ def _build_gp(theta: np.ndarray,
     # 把 unconstrained 的 logit_mix 映射到 (0, 1)
     mix = 1.0 / (1.0 + np.exp(-logit_mix))
 
-    kernel = terms.RotationTerm(
+    kernel = _build_rotation_term(
         log_amp=log_amp,
         log_period=log_period,
         log_Q0=log_Q0,
@@ -107,9 +148,37 @@ def _build_gp(theta: np.ndarray,
         mix=mix,
     )
 
-    gp = GaussianProcess(kernel, t=t, diag=yerr ** 2, mean=0.0)
-    # 这里不调用 gp.compute(t, yerr)，log_likelihood 里会自动处理
-    return gp, mix
+    # 不同版本的 celerite2 对 GaussianProcess 构造函数的参数支持略有差异；
+    # 优先使用最通用的调用方式，失败则回退到传入 t/diag 的老接口。
+    last_exc: Exception | None = None
+    for ctor in (
+        lambda: GaussianProcess(kernel, mean=0.0),
+        lambda: GaussianProcess(kernel, t=t, diag=yerr ** 2, mean=0.0),
+    ):
+        try:
+            gp = ctor()
+            return gp, mix
+        except Exception as e:  # pragma: no cover - 依赖具体的 celerite2 版本
+            last_exc = e
+
+    # 如果两种构造方式都失败，抛出最后的异常信息，供上层捕获并给出提示。
+    raise last_exc if last_exc is not None else RuntimeError("Failed to build GaussianProcess.")
+
+
+def _compute_gp(gp: GaussianProcess, t: np.ndarray, yerr: np.ndarray):
+    """
+    兼容不同版本 celerite2 的 compute 接口：
+    - 新版：compute(t, yerr=...)
+    - 一些旧版：compute(t, diag=...)
+    """
+    last_exc: Exception | None = None
+    for kwargs in ({"yerr": yerr}, {"diag": yerr ** 2}):
+        try:
+            gp.compute(t, **kwargs)
+            return
+        except Exception as e:  # pragma: no cover - 依赖 celerite2 版本
+            last_exc = e
+    raise last_exc if last_exc is not None else RuntimeError("Failed to compute GP covariance.")
 
 
 def _neg_loglike(theta: np.ndarray,
@@ -120,7 +189,7 @@ def _neg_loglike(theta: np.ndarray,
     try:
         gp, _ = _build_gp(theta, t, yerr)
         # compute 一般在 log_likelihood 内部被调用；这里显式调一下也可
-        gp.compute(t, yerr)
+        _compute_gp(gp, t, yerr)
         nll = -gp.log_likelihood(y)
         if not np.isfinite(nll):
             return 1e25
@@ -220,7 +289,7 @@ def fit_qpgp_single_star(
     # 计算最终 GP 和 log-like
     try:
         gp_final, mix_final = _build_gp(theta_opt, t, yerr)
-        gp_final.compute(t, yerr)
+        _compute_gp(gp_final, t, yerr)
         logL = gp_final.log_likelihood(y)
     except Exception as e:
         return QPGPResult(
