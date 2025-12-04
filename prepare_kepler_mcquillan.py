@@ -15,6 +15,8 @@ prepare_kepler_mcquillan.py
 """
 
 import os
+import sys
+import builtins
 from pathlib import Path
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +25,30 @@ import pandas as pd
 
 from astroquery.vizier import Vizier
 import lightkurve as lk
+
+
+# -------------------------
+# 安全打印：避免并发时 stdout 意外关闭导致 ValueError
+# -------------------------
+_builtin_print = builtins.print
+
+
+def safe_print(*args, **kwargs):
+    """打印到 stdout，若 stdout 被关闭则回退到 stderr，不抛出异常。"""
+    try:
+        _builtin_print(*args, **kwargs)
+    except ValueError:
+        try:
+            kwargs_err = dict(kwargs)
+            kwargs_err["file"] = sys.stderr
+            _builtin_print(*args, **kwargs_err)
+        except Exception:
+            # 若 stderr 也不可用，静默跳过，避免线程崩溃
+            pass
+
+
+# 将模块内 print 引用指向 safe_print
+print = safe_print
 
 
 # -------------------------
