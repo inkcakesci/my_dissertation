@@ -179,13 +179,36 @@ def main():
         qpgp_logL = np.nan
         qpgp_success = False
         if not args.skip_qpgp and HAS_QPGP:
-            # 用 ACF 结果作为初始化，如果 ACF 是 NaN 就退回 LS
-            p_init_candidates = [prot_acf, prot_ls]
+            # 用 ACF/LS/GPS 结果作为初始化和先验
+            p_init_candidates = [prot_acf, prot_ls, prot_gps]
             p_init = np.nan
             for p in p_init_candidates:
                 if np.isfinite(p):
                     p_init = p
                     break
+
+            # 根据多个估计值设定一个 log-period 的先验强度
+            finite_seeds = [p for p in p_init_candidates if np.isfinite(p)]
+            period_prior = np.nan
+            prior_sigma = 0.2
+            if finite_seeds:
+                period_prior = float(np.nanmedian(finite_seeds))
+                if len(finite_seeds) >= 2 and np.nanmax(finite_seeds) / np.nanmin(finite_seeds) < 1.5:
+                    # 多个方法一致时，收紧先验，防止跑到上界
+                    prior_sigma = 0.015
+                else:
+                    prior_sigma = 0.12
+                # 如果和 catalog label 差异非常大，用 label 作为兜底先验，避免跑到边界
+                if np.isfinite(prot_label):
+                    combined = finite_seeds + [prot_label]
+                    ratio_to_label = max(combined) / max(min(combined), 1e-3)
+                    if ratio_to_label > 2.0:
+                        period_prior = float(prot_label)
+                        prior_sigma = 0.02
+            elif np.isfinite(prot_label):
+                # 作为兜底，用 catalog label 当作宽先验
+                period_prior = float(prot_label)
+                prior_sigma = 0.2
 
             try:
                 res = fit_qpgp_single_star(
@@ -193,6 +216,8 @@ def main():
                     p_init=p_init if np.isfinite(p_init) else None,
                     min_period=0.5,
                     max_period=40.0,
+                    period_prior=period_prior if np.isfinite(period_prior) else None,
+                    log_period_prior_sigma=prior_sigma,
                 )
                 prot_qpgp = res.period
                 qpgp_logL = res.log_likelihood

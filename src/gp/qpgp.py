@@ -184,13 +184,20 @@ def _compute_gp(gp: GaussianProcess, t: np.ndarray, yerr: np.ndarray):
 def _neg_loglike(theta: np.ndarray,
                  t: np.ndarray,
                  y: np.ndarray,
-                 yerr: np.ndarray) -> float:
+                 yerr: np.ndarray,
+                 log_period_prior: float | None = None,
+                 log_period_prior_sigma: float | None = None) -> float:
     """供优化器调用的负对数似然."""
     try:
         gp, _ = _build_gp(theta, t, yerr)
         # compute 一般在 log_likelihood 内部被调用；这里显式调一下也可
         _compute_gp(gp, t, yerr)
         nll = -gp.log_likelihood(y)
+        if log_period_prior is not None and log_period_prior_sigma is not None and log_period_prior_sigma > 0:
+            # 在 log_period 上加一个高斯先验，避免优化总是跑到上界
+            lp = theta[1]
+            diff = (lp - log_period_prior) / log_period_prior_sigma
+            nll = nll + 0.5 * diff * diff
         if not np.isfinite(nll):
             return 1e25
         return float(nll)
@@ -206,6 +213,8 @@ def fit_qpgp_single_star(
     p_init: Optional[float] = None,
     min_period: float = 0.5,
     max_period: float = 40.0,
+    period_prior: Optional[float] = None,
+    log_period_prior_sigma: float = 0.2,
 ) -> QPGPResult:
     """
     对单颗星的光变进行 QP-GP (RotationTerm) 拟合，估计自转周期。
@@ -219,6 +228,11 @@ def fit_qpgp_single_star(
         实际使用中建议用 ACF/LS 的结果喂进来。
     min_period, max_period : float
         周期搜索范围（天），用于约束 log_period。
+    period_prior : float, optional
+        期望的周期（天），用于在 log_period 上加一个高斯先验（防止跑到上界）。
+        若未提供，则默认使用 p_init（如果有效）。
+    log_period_prior_sigma : float
+        log(周期) 先验的标准差（自然对数单位），数值越小约束越强。
 
     返回
     ----
@@ -252,6 +266,15 @@ def fit_qpgp_single_star(
         p_init = 0.5 * (min_period + max_period)
 
     p_init = float(np.clip(p_init, min_period, max_period))
+    if period_prior is None or not np.isfinite(period_prior):
+        period_prior = p_init
+
+    # 如果有先验，用它收窄一下搜索窗口，避免优化器过度偏向超长周期
+    if period_prior is not None and np.isfinite(period_prior):
+        min_p_adj = max(min_period, period_prior / 6.0)
+        max_p_adj = min(max_period, period_prior * 6.0)
+        if max_p_adj > min_p_adj * 1.2:  # 保证还有一定搜索宽度
+            min_period, max_period = float(min_p_adj), float(max_p_adj)
 
     var_y = np.var(y)
     if var_y <= 0:
@@ -278,7 +301,13 @@ def fit_qpgp_single_star(
     res = minimize(
         _neg_loglike,
         theta0,
-        args=(t, y, yerr),
+        args=(
+            t,
+            y,
+            yerr,
+            np.log(period_prior) if (period_prior is not None and np.isfinite(period_prior)) else None,
+            log_period_prior_sigma,
+        ),
         method="L-BFGS-B",
         bounds=bounds,
     )
