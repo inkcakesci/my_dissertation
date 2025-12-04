@@ -17,6 +17,7 @@ prepare_kepler_mcquillan.py
 import os
 from pathlib import Path
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
@@ -288,6 +289,7 @@ def download_lightcurves_for_sample(
     sample_df: pd.DataFrame,
     max_targets: int | None = None,
     overwrite: bool = False,
+    num_workers: int = 1,
 ):
     """
     对样本中的每个 KIC 下载光变（可限制最多下载多少颗）。
@@ -300,6 +302,8 @@ def download_lightcurves_for_sample(
         最多处理前多少颗目标（用于快速测试）。
     overwrite : bool
         若为 True，则强制重新下载并覆盖已有 npz。
+    num_workers : int
+        并行下载的线程数。大于 1 时启用线程池并发下载。
     """
     if "kic" not in sample_df.columns:
         raise ValueError("Sample DataFrame missing 'kic' column.")
@@ -308,15 +312,34 @@ def download_lightcurves_for_sample(
     if max_targets is not None:
         kics = kics[:max_targets]
 
-    print(f"[INFO] Start downloading lightcurves for {len(kics)} targets...")
     n_success, n_fail = 0, 0
 
-    for kic in kics:
+    def download_single(kic: int) -> bool:
         path = download_kepler_lightcurve_for_kic(kic, overwrite=overwrite)
-        if path is None:
-            n_fail += 1
-        else:
-            n_success += 1
+        return path is not None
+
+    if num_workers <= 1:
+        print(f"[INFO] Start downloading lightcurves sequentially for {len(kics)} targets...")
+        for kic in kics:
+            if download_single(kic):
+                n_success += 1
+            else:
+                n_fail += 1
+    else:
+        print(f"[INFO] Start downloading lightcurves with {num_workers} workers for {len(kics)} targets...")
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_kic = {executor.submit(download_single, kic): kic for kic in kics}
+            for future in as_completed(future_to_kic):
+                kic = future_to_kic[future]
+                try:
+                    ok = future.result()
+                except Exception as e:
+                    print(f"[WARN] Worker error for KIC {kic}: {e}")
+                    ok = False
+                if ok:
+                    n_success += 1
+                else:
+                    n_fail += 1
 
     print(f"[INFO] Download finished. Success={n_success}, Fail={n_fail}")
 
@@ -362,6 +385,12 @@ def parse_args():
         "--overwrite-lc",
         action="store_true",
         help="Overwrite existing LC npz files.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="并行下载线程数，>1 时使用多线程下载光变。",
     )
     parser.add_argument(
         "--noproxy",
@@ -414,6 +443,7 @@ def main():
         sample_df,
         max_targets=args.max_download,
         overwrite=args.overwrite_lc,
+        num_workers=args.num_workers,
     )
 
 
