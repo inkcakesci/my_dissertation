@@ -90,6 +90,31 @@ def _resample_to_uniform(time: np.ndarray, flux: np.ndarray) -> Tuple[np.ndarray
     return t_uniform, y_uniform, dt
 
 
+def _cwt_morlet_manual(y: np.ndarray, widths: np.ndarray) -> np.ndarray:
+    """
+    手写一个非常简单的 CWT：
+    - 对每个 width，生成一个 Morlet 小波；
+    - 用 fftconvolve 做卷积；
+    - 返回形状 (n_widths, n_time) 的系数矩阵。
+
+    这样就不依赖 scipy.signal.cwt 了。
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    coefs = np.empty((len(widths), n), dtype=complex)
+
+    for i, w in enumerate(widths):
+        # wavelet 长度：取 max(n, 8*w)，避免太短
+        M = max(n, int(8 * w))
+        # morlet2(M, s) 里的 s 是类似尺度；这里直接用 width 当尺度
+        psi = signal.morlet2(M, s=w, w=6.0)
+        # 卷积，mode="same" 保持和 y 同长度
+        conv = signal.fftconvolve(y, psi[::-1], mode="same")
+        coefs[i, :] = conv
+
+    return coefs
+
+
 def estimate_period_gps(
     time: np.ndarray,
     flux: np.ndarray,
@@ -148,16 +173,16 @@ def estimate_period_gps(
 
     periods = np.linspace(min_period, max_period, n_periods)
 
-    # SciPy cwt 的 widths 大致可以理解为“以采样点为单位的尺度”，
-    # 我们用 period / dt 做一个线性对应即可。
+    # widths 用 period / dt 做线性对应
     widths = periods / dt
 
-    def _morlet_func(M, s):
-        # s 类似于尺度，传给 morlet2 的 w 取 6.0 是比较常用的选择
-        return signal.morlet2(M, s, w=6.0)
+    # 使用手写 CWT
+    try:
+        cwt_coef = _cwt_morlet_manual(y_u, widths)
+    except Exception as e:
+        print(f"[WARN] Manual CWT failed: {e}")
+        return np.nan, 0.0, {}
 
-    # 计算 CWT 系数: shape = (n_periods, n_time)
-    cwt_coef = signal.cwt(y_u, _morlet_func, widths)
     power = np.abs(cwt_coef) ** 2
 
     # 对时间方向平均，得到每个 period 上的总体功率
