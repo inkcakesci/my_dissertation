@@ -14,41 +14,19 @@ prepare_kepler_mcquillan.py
     pip install lightkurve astroquery pandas numpy matplotlib astropy scipy
 """
 
+# 基础用法：
+# 1) 安装依赖：pip install -r requirements.txt
+# 2) 顺序下载目录与光变：python prepare_kepler_mcquillan.py --n-sample 50 --max-download 50
+# 3) 若无需代理：在命令后加 --noproxy
+
 import os
-import sys
-import builtins
 from pathlib import Path
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
 from astroquery.vizier import Vizier
 import lightkurve as lk
-
-
-# -------------------------
-# 安全打印：避免并发时 stdout 意外关闭导致 ValueError
-# -------------------------
-_builtin_print = builtins.print
-
-
-def safe_print(*args, **kwargs):
-    """打印到 stdout，若 stdout 被关闭则回退到 stderr，不抛出异常。"""
-    try:
-        _builtin_print(*args, **kwargs)
-    except ValueError:
-        try:
-            kwargs_err = dict(kwargs)
-            kwargs_err["file"] = sys.stderr
-            _builtin_print(*args, **kwargs_err)
-        except Exception:
-            # 若 stderr 也不可用，静默跳过，避免线程崩溃
-            pass
-
-
-# 将模块内 print 引用指向 safe_print
-print = safe_print
 
 
 # -------------------------
@@ -315,10 +293,9 @@ def download_lightcurves_for_sample(
     sample_df: pd.DataFrame,
     max_targets: int | None = None,
     overwrite: bool = False,
-    num_workers: int = 1,
 ):
     """
-    对样本中的每个 KIC 下载光变（可限制最多下载多少颗）。
+    对样本中的每个 KIC 顺序下载光变（可限制最多下载多少颗）。
 
     参数
     ----
@@ -328,8 +305,6 @@ def download_lightcurves_for_sample(
         最多处理前多少颗目标（用于快速测试）。
     overwrite : bool
         若为 True，则强制重新下载并覆盖已有 npz。
-    num_workers : int
-        并行下载的线程数。大于 1 时启用线程池并发下载。
     """
     if "kic" not in sample_df.columns:
         raise ValueError("Sample DataFrame missing 'kic' column.")
@@ -344,28 +319,12 @@ def download_lightcurves_for_sample(
         path = download_kepler_lightcurve_for_kic(kic, overwrite=overwrite)
         return path is not None
 
-    if num_workers <= 1:
-        print(f"[INFO] Start downloading lightcurves sequentially for {len(kics)} targets...")
-        for kic in kics:
-            if download_single(kic):
-                n_success += 1
-            else:
-                n_fail += 1
-    else:
-        print(f"[INFO] Start downloading lightcurves with {num_workers} workers for {len(kics)} targets...")
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_kic = {executor.submit(download_single, kic): kic for kic in kics}
-            for future in as_completed(future_to_kic):
-                kic = future_to_kic[future]
-                try:
-                    ok = future.result()
-                except Exception as e:
-                    print(f"[WARN] Worker error for KIC {kic}: {e}")
-                    ok = False
-                if ok:
-                    n_success += 1
-                else:
-                    n_fail += 1
+    print(f"[INFO] Start downloading lightcurves sequentially for {len(kics)} targets...")
+    for kic in kics:
+        if download_single(kic):
+            n_success += 1
+        else:
+            n_fail += 1
 
     print(f"[INFO] Download finished. Success={n_success}, Fail={n_fail}")
 
@@ -411,12 +370,6 @@ def parse_args():
         "--overwrite-lc",
         action="store_true",
         help="Overwrite existing LC npz files.",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=1,
-        help="并行下载线程数，>1 时使用多线程下载光变。",
     )
     parser.add_argument(
         "--noproxy",
@@ -469,7 +422,6 @@ def main():
         sample_df,
         max_targets=args.max_download,
         overwrite=args.overwrite_lc,
-        num_workers=args.num_workers,
     )
 
 
