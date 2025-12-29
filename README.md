@@ -9,9 +9,13 @@
 - 运行 Lomb–Scargle 与自相关函数（ACF）两种传统算法，得到基线周期估计 CSV。
 
 ## 环境依赖
-建议使用 Python 3.10+。核心依赖（未写入 `requirements.txt`，请手动安装）：
+建议使用 Python 3.10+。基础依赖已写入 `requirements.txt`：
 ```bash
-pip install lightkurve astroquery pandas numpy matplotlib astropy scipy
+pip install -r requirements.txt
+```
+额外依赖（用于下载与处理光变）：
+```bash
+pip install lightkurve astroquery scipy
 ```
 
 ## 目录结构
@@ -30,13 +34,21 @@ pip install lightkurve astroquery pandas numpy matplotlib astropy scipy
 │  ├─ mcquillan2014_sample.csv    # 筛选后的随机样本（含标注周期）
 │  ├─ baseline_periods_ls_acf.csv # 基线输出示例
 │  └─ lightcurves/                # 下载的光变 npz：time/flux/flux_err
-├─ part1.ipynb, plot.ipynb        # 探索/可视化笔记本
+├─ part1.ipynb                    # 早期探索笔记本
+├─ plot.ipynb                     # 数据集基本概况与可视化
+├─ count_valid_npz.ipynb          # 统计有效 npz 文件数量
+├─ pca_clustering.ipynb           # PCA + 聚类分析（论文主体）
 └─ Reference/                     # 论文相关参考资料（如有）
 ```
 
 ## 数据流程与目标
 - 论文实验数据链路：VizieR 下载目录 → 周期筛选与随机采样 → MAST 下载光变 → 传统基线（LS/ACF）估计 → 输出对比用 CSV。
 - 提供的 CSV 和 npz 可直接复现实验，或作为后续模型的输入/标签。
+
+## Notebook 说明
+- `plot.ipynb`：数据集基本概况、分布图、相关性与基线结果对照。
+- `count_valid_npz.ipynb`：统计 `data/kepler/lightcurves` 下有效 npz 文件数量。
+- `pca_clustering.ipynb`：PCA 降维 + KMeans/GMM 聚类与群组画像汇总。
 
 ## 快速开始
 1) **下载目录与光变**（默认尝试本地代理 `127.0.0.1:7890`；若不需要可加 `--noproxy`）：
