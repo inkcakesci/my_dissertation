@@ -24,6 +24,7 @@ run_baseline_periods.py
 
 import argparse
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -64,7 +65,17 @@ def parse_args():
         "--skip-qpgp", action="store_true",
         help="跳过 QP-GP 拟合（例如未安装 celerite2 或想节省时间）。"
     )
+    p.add_argument(
+        "--save-every", type=int, default=25,
+        help="每处理 N 个目标自动保存一次 CSV；设为 0 可关闭中间保存。"
+    )
     return p.parse_args()
+
+
+def _save_rows(rows: list[dict], out_path: Path, *, prefix: str) -> None:
+    out_df = pd.DataFrame(rows)
+    out_df.to_csv(out_path, index=False)
+    print(f"{prefix} Saved {len(out_df)} rows to: {out_path}", flush=True)
 
 
 def _load_label_catalog() -> pd.DataFrame:
@@ -124,24 +135,31 @@ def main():
 
     # 2. 根据现有 npz 列出所有 KIC（已下载且“验证过”的光变）
     kics = _list_kics_from_npz(max_targets=args.max_targets)
+    total_kics = len(kics)
+    overall_start = time.perf_counter()
+    save_every = max(0, int(args.save_every))
 
     rows = []
-    for kic in kics:
+    for idx, kic in enumerate(kics, start=1):
+        star_start = time.perf_counter()
         if kic not in label_map:
-            print(f"[WARN] KIC {kic} not found in catalog, skip.")
+            print(f"[WARN] [{idx}/{total_kics}] KIC {kic} not found in catalog, skip.", flush=True)
             continue
 
         prot_label = float(label_map[kic])
-        print(f"\n[INFO] Processing KIC {kic} (label Prot={prot_label:.3f} d)")
+        print(
+            f"\n[INFO] [{idx}/{total_kics}] Processing KIC {kic} (label Prot={prot_label:.3f} d)",
+            flush=True,
+        )
 
         # 3. 从 npz 读取光变；如果 npz 自身有损坏，这里会直接抛异常，我们捕获后跳过该星
         try:
             t, flux, flux_err = load_kepler_npz(kic)
         except FileNotFoundError as e:
-            print(f"[WARN] NPZ file not found for KIC {kic}: {e}")
+            print(f"[WARN] [{idx}/{total_kics}] NPZ file not found for KIC {kic}: {e}", flush=True)
             continue
         except Exception as e:
-            print(f"[WARN] Failed to load npz for KIC {kic}: {e}")
+            print(f"[WARN] [{idx}/{total_kics}] Failed to load npz for KIC {kic}: {e}", flush=True)
             continue
 
         # ---------- LS ----------
@@ -169,10 +187,10 @@ def main():
                     max_period=40.0,
                 )
             except Exception as e:
-                print(f"[WARN] GPS method failed for KIC {kic}: {e}")
+                print(f"[WARN] [{idx}/{total_kics}] GPS method failed for KIC {kic}: {e}", flush=True)
                 prot_gps, q_gps = np.nan, np.nan
         else:
-            print("[INFO] Skip GPS for this run (--skip-gps).")
+            print(f"[INFO] [{idx}/{total_kics}] Skip GPS for this run (--skip-gps).", flush=True)
 
         # ---------- QP-GP ----------
         prot_qpgp = np.nan
@@ -223,16 +241,19 @@ def main():
                 qpgp_logL = res.log_likelihood
                 qpgp_success = res.success
                 if res.success and np.isfinite(prot_qpgp):
-                    print(f"[INFO] QP-GP period = {prot_qpgp:.4f} d (success={res.success})")
+                    print(
+                        f"[INFO] [{idx}/{total_kics}] QP-GP period = {prot_qpgp:.4f} d (success={res.success})",
+                        flush=True,
+                    )
                 else:
                     msg = res.message if hasattr(res, "message") else ""
                     extra = f": {msg}" if msg else ""
-                    print(f"[WARN] QP-GP fit not successful for KIC {kic}{extra}")
+                    print(f"[WARN] [{idx}/{total_kics}] QP-GP fit not successful for KIC {kic}{extra}", flush=True)
             except Exception as e:
-                print(f"[WARN] QP-GP fit failed for KIC {kic}: {e}")
+                print(f"[WARN] [{idx}/{total_kics}] QP-GP fit failed for KIC {kic}: {e}", flush=True)
                 prot_qpgp, qpgp_logL, qpgp_success = np.nan, np.nan, False
         elif args.skip_qpgp:
-            print("[INFO] Skip QP-GP for this run (--skip-qpgp).")
+            print(f"[INFO] [{idx}/{total_kics}] Skip QP-GP for this run (--skip-qpgp).", flush=True)
 
         rows.append({
             "kic": kic,
@@ -252,10 +273,23 @@ def main():
             "qpgp_success": qpgp_success,
         })
 
-    out_df = pd.DataFrame(rows)
-    out_df.to_csv(OUT_CSV, index=False)
-    print(f"\n[INFO] Saved baseline results to: {OUT_CSV}")
-    print(f"[INFO] Total stars processed (rows in output) = {len(out_df)}")
+        elapsed = time.perf_counter() - star_start
+        print(
+            f"[INFO] [{idx}/{total_kics}] Completed KIC {kic} in {elapsed:.1f}s "
+            f"(LS={prot_ls:.3f}, ACF={prot_acf:.3f}, GPS={prot_gps:.3f}, QP-GP={prot_qpgp:.3f})",
+            flush=True,
+        )
+        if save_every and idx % save_every == 0:
+            _save_rows(
+                rows,
+                OUT_CSV,
+                prefix=f"[INFO] [{idx}/{total_kics}] Checkpoint.",
+            )
+
+    _save_rows(rows, OUT_CSV, prefix="\n[INFO] Final.")
+    total_elapsed = time.perf_counter() - overall_start
+    print(f"[INFO] Total stars processed (rows in output) = {len(rows)}", flush=True)
+    print(f"[INFO] Total elapsed time = {total_elapsed / 60:.2f} min", flush=True)
 
 
 if __name__ == "__main__":
