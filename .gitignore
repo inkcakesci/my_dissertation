@@ -3,3 +3,6 @@
 
 data/*
 *.pyc
+
+*.pdf
+答辩*.md
